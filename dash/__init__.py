@@ -29,6 +29,7 @@ from ._get_paths import (  # noqa: F401,E402
 from ._no_update import NoUpdate  # noqa: F401,E402
 from .background_callback import (  # noqa: F401,E402
     CeleryManager,
+    CeleryDiskcacheManager,
     DiskcacheManager,
 )
 from ._utils import stringify_id  # noqa: F401,E402
@@ -82,6 +83,7 @@ __all__ = [
     "get_relative_path",
     "strip_relative_path",
     "CeleryManager",
+    "CeleryDiskcacheManager",
     "DiskcacheManager",
     "register_page",
     "page_registry",

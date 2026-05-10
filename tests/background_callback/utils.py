@@ -48,6 +48,19 @@ def get_background_callback_manager():
         background_callback_manager = CeleryManager(celery_app)
         redis_conn = redis.Redis(host="localhost", port=6379, db=1)
         background_callback_manager.test_lock = redis_conn.lock("test-lock")
+    elif os.environ.get("LONG_CALLBACK_MANAGER", None) == "celery_diskcache":
+        from dash.background_callback import CeleryDiskcacheManager
+        from celery import Celery
+        import diskcache
+
+        celery_app = Celery(
+            __name__,
+            broker=os.environ.get("CELERY_BROKER"),
+            backend=os.environ.get("CELERY_BACKEND"),
+        )
+        cache = diskcache.Cache(os.environ.get("DISKCACHE_DIR"))
+        background_callback_manager = CeleryDiskcacheManager(celery_app, cache=cache)
+        background_callback_manager.test_lock = diskcache.Lock(cache, "test-lock")
     elif os.environ.get("LONG_CALLBACK_MANAGER", None) == "diskcache":
         import diskcache
 
@@ -155,6 +168,64 @@ def setup_background_callback_app(manager_name, app_name):
             shutil.rmtree(cache_directory, ignore_errors=True)
             os.environ.pop("LONG_CALLBACK_MANAGER")
             os.environ.pop("DISKCACHE_DIR")
+            from dash import page_registry
+
+            page_registry.clear()
+
+    elif manager_name == "celery_diskcache":
+        os.environ["LONG_CALLBACK_MANAGER"] = "celery_diskcache"
+        redis_url = os.environ["REDIS_URL"].rstrip("/")
+        os.environ["CELERY_BROKER"] = f"{redis_url}/0"
+        os.environ["CELERY_BACKEND"] = f"{redis_url}/1"
+
+        cache_directory = tempfile.mkdtemp(prefix="lc-celery-diskcache-")
+        print(cache_directory)
+        os.environ["DISKCACHE_DIR"] = cache_directory
+
+        # Clear redis of cached values (broker may have stale tasks)
+        redis_conn = redis.Redis(host="localhost", port=6379, db=1)
+        cache_keys = redis_conn.keys()
+        if cache_keys:
+            redis_conn.delete(*cache_keys)
+
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "celery",
+                "-A",
+                f"tests.background_callback.{app_name}:handle",
+                "worker",
+                "-P",
+                "prefork",
+                "--concurrency",
+                "2",
+                "--loglevel=info",
+            ],
+            encoding="utf8",
+            preexec_fn=os.setpgrp,
+            stderr=subprocess.PIPE,
+        )
+        lines = []
+        for line in iter(worker.stderr.readline, ""):
+            if "ready" in line:
+                break
+            lines.append(line)
+        else:
+            error = "\n".join(lines)
+            error += f"\nPath: {sys.path}"
+            raise RuntimeError(f"celery failed to start: {error}")
+
+        try:
+            yield import_app(f"tests.background_callback.{app_name}")
+        finally:
+            time.sleep(0.5)
+            os.environ.pop("LONG_CALLBACK_MANAGER")
+            os.environ.pop("CELERY_BROKER")
+            os.environ.pop("CELERY_BACKEND")
+            os.environ.pop("DISKCACHE_DIR")
+            kill(worker.pid)
+            shutil.rmtree(cache_directory, ignore_errors=True)
             from dash import page_registry
 
             page_registry.clear()
